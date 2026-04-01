@@ -118,6 +118,15 @@ get_start_cmd() {
     esac
 }
 
+kill_port() {
+    local port="$1"
+    [[ -z "$port" ]] && return
+    lsof -ti ":$port" 2>/dev/null | while read -r pid; do
+        kill "$pid" 2>/dev/null && warn "killed stale process $pid on port $port"
+    done
+    sleep 1
+}
+
 start_one() {
     local comp="$1"
 
@@ -128,6 +137,10 @@ start_one() {
         stream)  is_healthy icecast   || { err "start icecast first"; return 1; } ;;
         bumpers) is_healthy music-gen || { err "start music-gen first"; return 1; } ;;
     esac
+
+    # Kill stale processes hogging the port before starting
+    local port="${COMP_PORT[$comp]}"
+    [[ -n "$port" ]] && kill_port "$port"
 
     local cmd; cmd="$(get_start_cmd "$comp")" || return 1
     ensure_window "$comp"
@@ -142,14 +155,21 @@ start_one() {
 }
 
 stop_one() {
-    local comp="$1" pat="${COMP_PGREP[$1]}"
+    local comp="$1" pat="${COMP_PGREP[$1]}" port="${COMP_PORT[$1]}"
 
     if ! window_exists "$comp" && ! check_process "$pat"; then
+        # Still check for orphaned port holders
+        if [[ -n "$port" ]] && lsof -ti ":$port" >/dev/null 2>&1; then
+            kill_port "$port"
+            ok "$comp stopped (orphan on :$port)"
+            return 0
+        fi
         ok "$comp already stopped"; return 0
     fi
 
     window_exists "$comp" && { tmux send-keys -t "$SESSION:$comp" C-c 2>/dev/null || true; sleep 2; }
     check_process "$pat" && { pkill -f "$pat" 2>/dev/null || true; sleep 1; }
+    [[ -n "$port" ]] && lsof -ti ":$port" >/dev/null 2>&1 && kill_port "$port"
     window_exists "$comp" && { tmux kill-window -t "$SESSION:$comp" 2>/dev/null || true; }
 
     ok "$comp stopped"
